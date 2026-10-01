@@ -2,6 +2,7 @@
 #include <linux/fs.h>
 #include <linux/namei.h>
 #include <linux/printk.h>
+#include <linux/workqueue.h>
 
 #include "feature/selinux_hide.h"
 
@@ -14,6 +15,32 @@
 
 bool ksu_module_mounted __read_mostly = false;
 bool ksu_boot_completed __read_mostly = false;
+bool ksu_ksud_present __read_mostly = false;
+
+static void ksu_check_ksud(void)
+{
+	struct path ksud;
+
+	if (kern_path(KSUD_PATH, 0, &ksud))
+		return;
+	path_put(&ksud);
+	WRITE_ONCE(ksu_ksud_present, true);
+}
+
+static void ksu_check_ksud_work_fn(struct work_struct *work)
+{
+	ksu_check_ksud();
+	if (READ_ONCE(ksu_ksud_present))
+		pr_info("ksud installed, su uses it from now on\n");
+}
+
+static DECLARE_WORK(ksu_check_ksud_work, ksu_check_ksud_work_fn);
+
+/* Safe from atomic context; re-checks for ksud in process context. */
+void ksu_recheck_ksud(void)
+{
+	schedule_work(&ksu_check_ksud_work);
+}
 
 extern void ksu_avc_spoof_late_init();
 
@@ -26,6 +53,9 @@ void on_post_fs_data(void)
 	}
 	done = true;
 	pr_info("on_post_fs_data!\n");
+
+	ksu_check_ksud();
+	pr_info("ksud %s\n", ksu_ksud_present ? "present" : "not installed");
 
 	ksu_load_allow_list();
 	ksu_observer_init();
